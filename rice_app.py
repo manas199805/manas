@@ -7,8 +7,9 @@ from skimage.segmentation import watershed
 from scipy import ndimage
 from PIL import Image
 import urllib.parse
-import pypdfum2 as pdfium  # Clean, system-independent PDF renderer
+import pypdfum2 as pdfium  # System-independent PDF renderer
 
+# Initialize layout
 st.set_page_config(page_title="Rice Precision Pro (CG Custom Milling)", layout="wide")
 st.title("🌾 Rice Quality Analyzer & CG Procurement Compliance Engine")
 
@@ -28,6 +29,7 @@ processing_type = st.sidebar.radio(
 phone_number = st.sidebar.text_input("WhatsApp Number", placeholder="e.g., 919876543210")
 pixel_to_mm_val = st.sidebar.slider("Calibration (Pixel to MM)", 0.01, 0.20, 0.13)
 
+# Official Chhattisgarh Food Department / GoI Uniform Specifications for Broken Caps
 GOVT_LIMITS = {
     "Raw Rice (Arva)": {"max_broken": 25.0, "max_small_broken": 1.0},
     "Parboiled Rice (Usna)": {"max_broken": 16.0, "max_small_broken": 1.0}
@@ -35,9 +37,11 @@ GOVT_LIMITS = {
 
 @st.cache_data(show_spinner=False)
 def process_rice(img_array, variety, p2mm):
+    # Keep a completely clean copy of the original user-uploaded matrix for drawing output
     display_img = img_array.copy()
     orig_h, orig_w = img_array.shape[:2]
     
+    # Internal scaling step to optimize watershed segmentation accuracy
     scale = 1.1
     w = int(orig_w * scale)
     h = int(orig_h * scale)
@@ -57,6 +61,7 @@ def process_rice(img_array, variety, p2mm):
     
     grain_data = []
     
+    # Minimum length/breadth aspect ratios to register valid classifications
     ratio_thresholds = {
         "Grade A (Long/Slender)": 2.5,
         "Common (Medium/Short)": 1.0
@@ -71,9 +76,10 @@ def process_rice(img_array, variety, p2mm):
         contours, _ = cv2.findContours(grain_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         
         if contours:
+            # Fix: Track the single largest contour segment inside the mask area
             target_contour = max(contours, key=cv2.contourArea)
             area = cv2.contourArea(target_contour)
-            if area < (80 * scale):
+            if area < (80 * scale): # Scaled noise threshold filter
                 continue 
             
             rect = cv2.minAreaRect(target_contour)
@@ -81,6 +87,7 @@ def process_rice(img_array, variety, p2mm):
             dim1, dim2 = rect[1]
             angle = rect[2]
             
+            # --- FIX: Scale tracking metrics back down to original image canvas system ---
             orig_center = (center_x / scale, center_y / scale)
             orig_dims = (dim1 / scale, dim2 / scale)
             
@@ -96,21 +103,28 @@ def process_rice(img_array, variety, p2mm):
 
             grain_data.append({'length': length, 'box': box, 'center': orig_center})
 
+    # --- Draw boxes and sizing metrics cleanly on original canvas ---
     for grain in grain_data:
+        # Standard rules: Full grain >= 4.5mm, Broken < 4.5mm, Small Broken < 1.5mm (Dust/Choor)
         if grain['length'] < 1.5:
-            color = (255, 0, 0)       
+            color = (255, 0, 0)       # Red for Small Broken (RGB mapping standard)
         elif grain['length'] < 4.5:
-            color = (255, 165, 0)     
+            color = (255, 165, 0)     # Orange for Standard Broken
         else:
-            color = (0, 255, 0)       
+            color = (0, 255, 0)       # Green for Head Rice / Full Grain
 
+        # Draw box contours safely on base image
         cv2.drawContours(display_img, [grain['box']], 0, color, 2)
         
+        # Calculate dynamic text centering anchors
         tx = int(grain['center'][0] - 12)
         ty = int(grain['center'][1] + 4)
+        
+        # Clamp coordinate values to prevent labels from printing off the matrix borders
         tx = max(5, min(tx, orig_w - 30))
         ty = max(15, min(ty, orig_h - 5))
         
+        # Render high-contrast overlay text (Black shadow outline underneath crisp White text)
         cv2.putText(display_img, f"{grain['length']:.1f}", (tx, ty), 
                     cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 0), 2, cv2.LINE_AA)
         cv2.putText(display_img, f"{grain['length']:.1f}", (tx, ty), 
@@ -119,45 +133,41 @@ def process_rice(img_array, variety, p2mm):
     df = pd.DataFrame(grain_data)
     return df, display_img
 
-# --- Dual-Input Framework System ---
-input_mode = st.radio("Choose Input Method", ["📤 Upload File (Image/PDF)", "📸 Use Live Camera Scanner"], horizontal=True)
+# --- Dual-Input Routing Mechanism ---
+input_mode = st.radio("Select Input Engine Source", ["📤 Upload File (Image or PDF Document)", "📸 Use Live Camera Scanner"], horizontal=True)
 
 final_image = None
 
-if input_mode == "📤 Upload File (Image/PDF)":
-    uploaded_file = st.file_uploader("Upload Sample Image or PDF Report", type=['jpg', 'jpeg', 'png', 'pdf'])
+if input_mode == "📤 Upload File (Image or PDF Document)":
+    uploaded_file = st.file_uploader("Upload Sample Image (.png, .jpg) or Digital PDF Report", type=['jpg', 'jpeg', 'png', 'pdf'])
     
     if uploaded_file is not None:
         if uploaded_file.name.lower().endswith('.pdf'):
-            with st.spinner("Extracting first page of PDF..."):
+            with st.spinner("Extracting first sheet from PDF stream..."):
                 try:
-                    # Convert PDF page bytes directly to an array
                     pdf = pdfium.PdfDocument(uploaded_file.read())
-                    page = pdf[0] # Grab first sheet
-                    bitmap = page.render(scale=2) # Higher scale means crisper extraction
+                    page = pdf[0] # Focus on page 1
+                    bitmap = page.render(scale=2) # Higher scale multiplier means crisper processing resolution
                     pil_img = bitmap.to_pil()
                     final_image = np.array(pil_img)
                 except Exception as e:
                     st.error(f"Error parsing PDF file: {e}")
         else:
-            # Handle standard flat image extensions safely
             image = Image.open(uploaded_file)
             final_image = np.array(image)
-
 else:
-    # Activates device webcam, back-facing camera on phones, or computer webcams
-    camera_image = st.camera_input("Position the grain tray underneath the lens and tap capture")
+    camera_image = st.camera_input("Place grain sample bed squarely under lens and capture")
     if camera_image is not None:
         image = Image.open(camera_image)
         final_image = np.array(image)
 
-# --- Processing & Reporting Engine ---
+# --- Analysis & Reporting Automation Core ---
 if final_image is not None:
-    # Ensure transparency channel (RGBA) doesn't break OpenCV contour tools
+    # Ensure transparency channel (RGBA) doesn't crash grayscale processing steps
     if final_image.shape[-1] == 4:
         final_image = cv2.cvtColor(final_image, cv2.COLOR_RGBA2RGB)
         
-    with st.spinner("Analyzing milling quality metrics..."):
+    with st.spinner("Executing analytical checks against Government FAQ parameters..."):
         df, result_img = process_rice(final_image, rice_variety, pixel_to_mm_val)
     
     st.image(result_img, use_container_width=True)
@@ -166,6 +176,7 @@ if final_image is not None:
         total = len(df)
         avg_l = df['length'].mean()
         
+        # High performance vectorized boolean counters
         small_broken_count = (df['length'] < 1.5).sum()
         total_broken_count = (df['length'] < 4.5).sum()
         
@@ -175,12 +186,13 @@ if final_image is not None:
         allowed_broken = GOVT_LIMITS[processing_type]["max_broken"]
         allowed_small_broken = GOVT_LIMITS[processing_type]["max_small_broken"]
         
+        # Automated CG Government Compliance Check
         is_compliant = (total_broken_pc <= allowed_broken) and (small_broken_pc <= allowed_small_broken)
         
         st.subheader(f"📊 {rice_variety} ({processing_type}) Analysis Report")
         
         if is_compliant:
-            st.success(f"✅ **Passes CG Government FAQ Norms:** Sample falls within acceptable delivery standards.")
+            st.success(f"✅ **Passes CG Government FAQ Norms:** Sample falls within acceptable state procurement delivery standards.")
         else:
             st.error(f"❌ **Rejection Alert (FAQ Out of Bounds):** Sample exceeds maximum permissible government broken allowances.")
             
@@ -216,4 +228,4 @@ if final_image is not None:
                 unsafe_allow_html=True
             )
     else:
-        st.warning("⚠️ No rice grains detected. Please adjust the threshold, check image lighting, or clean the scanner frame.")
+        st.warning("⚠️ No rice grains detected. Please adjust the threshold slider or clean the scanner bed lens surface.")
