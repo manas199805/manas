@@ -6,5 +6,5 @@ scikit-image
 scipy
 Pillow
 reportlab
-pypdfum2>=4.0.0
+pypdfum2
 
