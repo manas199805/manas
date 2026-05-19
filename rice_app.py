@@ -14,13 +14,11 @@ st.title("🌾 Rice Quality Analyzer & CG Procurement Compliance Engine")
 # --- Sidebar Configuration ---
 st.sidebar.header("Milling Parameters & Settings")
 
-# 1. Selection for Rice Type (determining standard dimensions)
 rice_variety = st.sidebar.selectbox(
     "Select Rice Variety", 
     ["Grade A (Long/Slender)", "Common (Medium/Short)"]
 )
 
-# 2. Selection for Processing Type (determining Government Broken Norms)
 processing_type = st.sidebar.radio(
     "Milling Type (CG Govt / FCI FAQ Standards)",
     ["Raw Rice (Arva)", "Parboiled Rice (Usna)"]
@@ -29,7 +27,6 @@ processing_type = st.sidebar.radio(
 phone_number = st.sidebar.text_input("WhatsApp Number", placeholder="e.g., 919876543210")
 pixel_to_mm_val = st.sidebar.slider("Calibration (Pixel to MM)", 0.01, 0.20, 0.13)
 
-# Define CG / Government Uniform Specification limits
 GOVT_LIMITS = {
     "Raw Rice (Arva)": {"max_broken": 25.0, "max_small_broken": 1.0},
     "Parboiled Rice (Usna)": {"max_broken": 16.0, "max_small_broken": 1.0}
@@ -37,14 +34,17 @@ GOVT_LIMITS = {
 
 @st.cache_data(show_spinner=False)
 def process_rice(img_array, variety, p2mm):
+    # Keep a completely clean copy of the original user-uploaded image for drawing output
+    display_img = img_array.copy()
+    orig_h, orig_w = img_array.shape[:2]
+    
+    # Internal scaling for improving watershed threshold accuracy
     scale = 1.1
-    w = int(img_array.shape[1] * scale)
-    h = int(img_array.shape[0] * scale)
-    img = cv2.resize(img_array, (w, h), interpolation=cv2.INTER_LANCZOS4)
+    w = int(orig_w * scale)
+    h = int(orig_h * scale)
+    img_resized = cv2.resize(img_array, (w, h), interpolation=cv2.INTER_LANCZOS4)
     
-    display_img = img.copy()
-    gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
-    
+    gray = cv2.cvtColor(img_resized, cv2.COLOR_RGB2GRAY)
     _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     kernel = np.ones((3,3), np.uint8)
     thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel, iterations=1)
@@ -57,9 +57,7 @@ def process_rice(img_array, variety, p2mm):
     labels = watershed(-distance, markers, mask=thresh)
     
     grain_data = []
-    adj_ratio = p2mm / scale
     
-    # Variety Aspect Ratios based on standard grain shape definitions
     ratio_thresholds = {
         "Grade A (Long/Slender)": 2.5,
         "Common (Medium/Short)": 1.0
@@ -76,35 +74,59 @@ def process_rice(img_array, variety, p2mm):
         if contours:
             target_contour = max(contours, key=cv2.contourArea)
             area = cv2.contourArea(target_contour)
-            if area < 80: 
+            if area < (80 * scale): # Scale the noise filter threshold dynamically
                 continue 
             
             rect = cv2.minAreaRect(target_contour)
-            box = np.intp(cv2.boxPoints(rect))
-            center = rect[0]
             
+            # --- CORRECTION: Scale bounding metrics back down to fit original base image ---
+            center_x, center_y = rect[0]
             dim1, dim2 = rect[1]
-            length = max(dim1, dim2) * adj_ratio
-            breadth = min(dim1, dim2) * adj_ratio
+            angle = rect[2]
+            
+            orig_center = (center_x / scale, center_y / scale)
+            orig_dims = (dim1 / scale, dim2 / scale)
+            
+            # Reconstruct the corrected box mapping coordinates
+            corrected_rect = (orig_center, orig_dims, angle)
+            box = np.intp(cv2.boxPoints(corrected_rect))
+            
+            # Calculate physical length using base p2mm factor
+            length = max(orig_dims) * p2mm
+            breadth = min(orig_dims) * p2mm
             
             current_ratio = length / breadth if breadth > 0 else 0
             if length > 5.0 and current_ratio < min_ratio:
                 continue 
 
-            grain_data.append({'length': length, 'box': box, 'center': center})
+            grain_data.append({'length': length, 'box': box, 'center': orig_center})
 
-    # Render results dynamically based on sorting definitions
+    # --- Draw boxes and text natively on original dimension matrix ---
     for grain in grain_data:
-        # Standard classification: Brokens are components less than 3/4th of target length (~4.5mm)
-        # Small brokens are dust/pieces falling below 1.5mm
         if grain['length'] < 1.5:
-            color = (0, 0, 255)       # Red for Small Broken
+            color = (255, 0, 0)       # Red for Small Broken (RGB mapping adjustment)
         elif grain['length'] < 4.5:
-            color = (0, 165, 255)     # Orange for Standard Broken
+            color = (255, 165, 0)     # Orange for Standard Broken
         else:
-            color = (0, 255, 0)       # Green for Head Rice / Full Grain
-            
+            color = (0, 255, 0)       # Green for Head Rice
+
+        # Draw the tracking contour box
         cv2.drawContours(display_img, [grain['box']], 0, color, 2)
+        
+        # Safe text coordinates calculation (centered horizontally, shifted slightly up)
+        tx = int(grain['center'][0] - 12)
+        ty = int(grain['center'][1] + 4)
+        
+        # Bound check coordinates to ensure text is never dropped off-canvas
+        tx = max(5, min(tx, orig_w - 30))
+        ty = max(15, min(ty, orig_h - 5))
+        
+        # Draw background shadow text for heavy contrast/visibility
+        cv2.putText(display_img, f"{grain['length']:.1f}", (tx, ty), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 0), 2, cv2.LINE_AA)
+        # Draw primary text
+        cv2.putText(display_img, f"{grain['length']:.1f}", (tx, ty), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1, cv2.LINE_AA)
 
     df = pd.DataFrame(grain_data)
     return df, display_img
@@ -123,36 +145,30 @@ if uploaded_file is not None:
         total = len(df)
         avg_l = df['length'].mean()
         
-        # Calculate Broken percentages based on technical grain sizing definitions
         small_broken_count = (df['length'] < 1.5).sum()
         total_broken_count = (df['length'] < 4.5).sum()
         
         small_broken_pc = (small_broken_count / total) * 100
         total_broken_pc = (total_broken_count / total) * 100
         
-        # Pull parameters based on user configurations
         allowed_broken = GOVT_LIMITS[processing_type]["max_broken"]
         allowed_small_broken = GOVT_LIMITS[processing_type]["max_small_broken"]
         
-        # Check overall state compliance criteria
         is_compliant = (total_broken_pc <= allowed_broken) and (small_broken_pc <= allowed_small_broken)
         
         st.subheader(f"📊 {rice_variety} ({processing_type}) Analysis Report")
         
-        # Compliance Banner System
         if is_compliant:
             st.success(f"✅ **Passes CG Government FAQ Norms:** Sample falls within the acceptable delivery standards.")
         else:
             st.error(f"❌ **Rejection Alert (FAQ Out of Bounds):** Sample exceeds maximum permissible government broken allowances.")
             
-        # Metric Display Blocks
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Total Grains Counted", total)
         c2.metric("Average Grain Size", f"{avg_l:.2f} mm")
         c3.metric("Total Broken %", f"{total_broken_pc:.1f}%", f"Max Limit: {allowed_broken}%", delta_color="inverse")
         c4.metric("Small Broken %", f"{small_broken_pc:.1f}%", f"Max Limit: {allowed_small_broken}%", delta_color="inverse")
         
-        # Build out the verification summary cards
         st.markdown("### 📋 Procurement Specification Summary Table")
         comparison_data = {
             "Refraction Parameter": ["Total Broken Grains", "Small Broken Grains (Dust/Choor)"],
@@ -163,9 +179,7 @@ if uploaded_file is not None:
         }
         st.table(pd.DataFrame(comparison_data))
         
-        # Sanitize phone numbers for SMS / WhatsApp gateways
         clean_phone = "".join(filter(str.isdigit, phone_number))
-        
         if clean_phone:
             status_text = "PASSED (FAQ COMPLIANT)" if is_compliant else "REJECTED (EXCEEDS LIMITS)"
             msg = f"*{rice_variety} - {processing_type} REPORT*\n\nStatus: {status_text}\nTotal Grains: {total}\nAvg Size: {avg_l:.2f}mm\nTotal Broken: {total_broken_pc:.1f}% (Max: {allowed_broken}%)\nSmall Broken: {small_broken_pc:.1f}% (Max: {allowed_small_broken}%)"
