@@ -6,3 +6,4 @@ scikit-image
 scipy
 Pillow
 reportlab
+pip install pypdfum2
